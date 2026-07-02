@@ -1,0 +1,10 @@
+streamlit
+google-genai
+pydantic
+docx2txt
+pdfplumber
+Pillow
+fpdf2
+python-dotenv
+markdown
+pdf2image
