@@ -19,6 +19,7 @@ from app_core import (
     negotiate_clause,
     generate_share_text,
     generate_pdf_report,
+    get_api_key,
     LegalAnalysisResult,
 )
 
@@ -657,6 +658,10 @@ model_selection = st.sidebar.selectbox(
     index=0,
     help="gemini-2.5-flash-lite is recommended for generous free-tier limits. Use gemini-2.5-flash for higher reasoning if you have quota remaining."
 )
+
+# GEMINI API key state
+gemini_api_key = get_api_key()
+gemini_key_configured = bool(gemini_api_key and gemini_api_key.strip())
 
 st.sidebar.markdown("---")
 
