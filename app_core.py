@@ -3,6 +3,7 @@ import base64
 import html as html_lib
 import re
 import json
+import time
 from google import genai
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -426,6 +427,60 @@ def unmask_text(text: str, mapping: dict) -> str:
     return text
 
 
+# Fallback model order when the primary model returns 503
+_FALLBACK_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-flash-latest",
+]
+
+_MAX_RETRIES = 3          # retries per model
+_INITIAL_BACKOFF = 2      # seconds
+
+
+def _call_gemini_with_retry(
+    client,
+    model_name: str,
+    prompt: str,
+    max_retries: int = _MAX_RETRIES,
+    initial_backoff: float = _INITIAL_BACKOFF,
+):
+    """
+    Call Gemini generate_content with exponential-backoff retries
+    on transient 503 / UNAVAILABLE errors.
+    Returns the response object or raises the last exception.
+    """
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config={
+                    'system_instruction': SYSTEM_PROMPT,
+                    'response_mime_type': 'application/json',
+                    'response_schema': LegalAnalysisResult,
+                }
+            )
+            return response  # success
+        except Exception as e:
+            last_exc = e
+            err_str = str(e).lower()
+            is_transient = (
+                "503" in err_str
+                or "unavailable" in err_str
+                or "resource_exhausted" in err_str
+                or "429" in err_str
+                or "quota" in err_str
+            )
+            if not is_transient:
+                raise  # non-transient error → don't retry
+            wait = initial_backoff * (2 ** attempt)
+            time.sleep(wait)
+    raise last_exc  # all retries exhausted
+
+
 def analyze_contract_text(
     text: str,
     model_name: str = 'gemini-2.0-flash',
@@ -433,35 +488,63 @@ def analyze_contract_text(
 ) -> LegalAnalysisResult:
     """
     Analyzes legal contract text using Gemini models with structured Pydantic schema.
-    Returns a full LegalAnalysisResult with clause-by-clause scoring, red flags, and negotiation points.
+    Returns a full LegalAnalysisResult with clause-by-clause scoring, red flags,
+    and negotiation points.
+
+    Automatically retries on transient 503/429 errors with exponential backoff,
+    and falls back to alternative models if the primary model is overloaded.
     """
     if not text.strip():
         raise ValueError("Contract text is empty.")
-        
+
     client = get_client()
     if mask_pii:
         text_to_analyze, pii_mapping = mask_sensitive_info(text)
     else:
         text_to_analyze, pii_mapping = text, {}
-    
-    prompt = f"Please analyze the following contract text:\n\n---\n\n{text_to_analyze}\n\n---"
-    
-    response = client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-        config={
-            'system_instruction': SYSTEM_PROMPT,
-            'response_mime_type': 'application/json',
-            'response_schema': LegalAnalysisResult,
-        }
-    )
-    
-    if response.parsed is None:
-        raise ValueError("Gemini did not return a valid structured contract analysis. Please try again.")
 
-    analyze_contract_text.last_masked_text = text_to_analyze
-    analyze_contract_text.last_pii_mapping = pii_mapping
-    return response.parsed
+    prompt = f"Please analyze the following contract text:\n\n---\n\n{text_to_analyze}\n\n---"
+
+    # Build ordered list of models to try: user's choice first, then fallbacks
+    models_to_try = [model_name]
+    for fb in _FALLBACK_MODELS:
+        if fb not in models_to_try:
+            models_to_try.append(fb)
+
+    last_exc = None
+    for model in models_to_try:
+        try:
+            response = _call_gemini_with_retry(client, model, prompt)
+            if response.parsed is None:
+                raise ValueError(
+                    "Gemini did not return a valid structured contract analysis. "
+                    "Please try again."
+                )
+            analyze_contract_text.last_masked_text = text_to_analyze
+            analyze_contract_text.last_pii_mapping = pii_mapping
+            analyze_contract_text.last_model_used = model
+            return response.parsed
+        except Exception as e:
+            last_exc = e
+            err_str = str(e).lower()
+            is_transient = (
+                "503" in err_str
+                or "unavailable" in err_str
+                or "resource_exhausted" in err_str
+                or "429" in err_str
+                or "quota" in err_str
+            )
+            if not is_transient:
+                raise  # non-transient error → stop immediately
+            # transient error → try next fallback model
+            continue
+
+    # All models exhausted
+    raise ValueError(
+        "All Gemini models are currently overloaded (503). "
+        "Please wait a few minutes and try again. "
+        f"Last error: {last_exc}"
+    )
 
 
 # ---------------------------------------------------------------------------

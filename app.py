@@ -840,6 +840,12 @@ if analysis_requested or has_saved_analysis:
                     # Serialize analysis for Q&A context
                     st.session_state["analysis_json"] = result.model_dump_json(indent=2)
 
+                    actual_model = getattr(analyze_contract_text, "last_model_used", model_selection)
+                    if actual_model != model_selection:
+                        st.info(
+                            f"ℹ️ **{model_selection}** was overloaded, so we "
+                            f"automatically used **{actual_model}** instead."
+                        )
                     st.success("✅ Analysis complete!")
                 else:
                     result = st.session_state["last_result"]
